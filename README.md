@@ -1,5 +1,5 @@
 
-# CityOps AI
+# CityOps AI - BPR
 
 A small educational project demonstrating GitHub-centered development of an
 AI-assisted municipal service planning workflow.
