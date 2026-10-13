@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local secrets
+.env
+
+# Local state and generated audit data
+cityops_state.json
+cityops_audit.jsonl
+
+# Test and coverage output
+.coverage
+htmlcov/
