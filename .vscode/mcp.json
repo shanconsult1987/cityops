@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "cityops-tools": {
+      "command": "python",
+      "args": [
+        "mcp_server.py"
+      ]
+    }
+  }
+}

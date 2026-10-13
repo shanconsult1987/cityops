@@ -1,0 +1,31 @@
+
+[
+  {
+    "id": "streetlight-001",
+    "description": "A streetlight is broken near the park",
+    "expected_service_type": "streetlight",
+    "expected_team": "Electrical Maintenance",
+    "expected_review": false
+  },
+  {
+    "id": "road-001",
+    "description": "There is a large pothole in the road",
+    "expected_service_type": "road_damage",
+    "expected_team": "Road Maintenance",
+    "expected_review": false
+  },
+  {
+    "id": "waste-001",
+    "description": "Garbage collection was missed today",
+    "expected_service_type": "waste_collection",
+    "expected_team": "Sanitation",
+    "expected_review": false
+  },
+  {
+    "id": "unknown-001",
+    "description": "I need help with an unusual municipal issue",
+    "expected_service_type": "unknown",
+    "expected_team": "Manual Review",
+    "expected_review": true
+  }
+]

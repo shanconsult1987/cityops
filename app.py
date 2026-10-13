@@ -1,12 +1,22 @@
+
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from openai_client import suggest_classification
+
 
 STATE_FILE = Path("cityops_state.json")
 AUDIT_FILE = Path("cityops_audit.jsonl")
+
+ALLOWED_CLASSIFICATIONS = {
+    "streetlight": ("Electrical Maintenance", "normal"),
+    "road_damage": ("Road Maintenance", "normal"),
+    "waste_collection": ("Sanitation", "normal"),
+    "unknown": ("Manual Review", "review"),
+}
 
 
 def utc_now():
@@ -44,6 +54,33 @@ def classify_request(description):
     }
 
 
+def validate_classification(candidate):
+    if not isinstance(candidate, dict):
+        return None
+
+    service_type = candidate.get("service_type")
+    if service_type not in ALLOWED_CLASSIFICATIONS:
+        return None
+
+    expected_team, _ = ALLOWED_CLASSIFICATIONS[service_type]
+
+    if candidate.get("team") != expected_team:
+        return None
+
+    priority = candidate.get("priority")
+    if priority not in {"normal", "urgent", "review"}:
+        return None
+
+    if service_type == "unknown" and priority != "review":
+        return None
+
+    return {
+        "service_type": service_type,
+        "team": expected_team,
+        "priority": priority,
+    }
+
+
 def load_state():
     if not STATE_FILE.exists():
         return {"requests": []}
@@ -70,19 +107,121 @@ def write_audit(event, request_id, details=None):
         file.write(json.dumps(record) + "\n")
 
 
+def triage_agent(description, rule_result, model_result):
+    """Identify unknown classifications and disagreements."""
+    validated_model = validate_classification(model_result)
+
+    conflict = (
+        validated_model is not None
+        and validated_model != rule_result
+    )
+
+    return {
+        "rule_classification": rule_result,
+        "model_classification": validated_model,
+        "classification_conflict": conflict,
+        "requires_review": (
+            rule_result["service_type"] == "unknown"
+            or conflict
+        ),
+    }
+
+
+def routing_agent(classification):
+    """Recommend a team; this role cannot approve or dispatch."""
+    return {
+        "team": classification["team"],
+        "service_type": classification["service_type"],
+        "routing_action": (
+            "manual_review"
+            if classification["service_type"] == "unknown"
+            else "recommend"
+        ),
+    }
+
+
+def safety_reviewer(request, triage, routing):
+    """Apply deterministic safety rules to the proposed plan."""
+    reasons = []
+
+    if request["service_type"] == "unknown":
+        reasons.append("Unknown service type")
+
+    if triage["requires_review"]:
+        reasons.append("Triage requested human review")
+
+    if request["priority"] == "review":
+        reasons.append("Priority requires review")
+
+    if routing["team"] == "Manual Review":
+        reasons.append("No operational team can be assigned automatically")
+
+    return {
+        "decision": (
+            "escalate"
+            if reasons
+            else "eligible_for_human_approval"
+        ),
+        "reasons": reasons,
+        "can_auto_approve": False,
+        "can_dispatch": False,
+    }
+
+
+def supervisor_plan(description):
+    """Coordinate the specialist functions and assemble the plan."""
+    rule_result = classify_request(description)
+    model_result = suggest_classification(description)
+
+    triage = triage_agent(
+        description,
+        rule_result,
+        model_result,
+    )
+
+    # Deterministic rules remain authoritative in this workshop.
+    classification = rule_result
+    routing = routing_agent(classification)
+
+    draft = {
+        "description": description,
+        **classification,
+    }
+
+    safety = safety_reviewer(draft, triage, routing)
+
+    return {
+        "classification": classification,
+        "triage": triage,
+        "routing": routing,
+        "safety": safety,
+    }
+
+
 def create_request(description):
     if not description or not description.strip():
         raise ValueError("Description cannot be empty.")
 
+    description = description.strip()
+    plan = supervisor_plan(description)
+    classification = plan["classification"]
+
     request_id = f"CITY-{uuid4().hex[:8].upper()}"
-    classification = classify_request(description.strip())
 
     request = {
         "request_id": request_id,
-        "description": description.strip(),
+        "description": description,
         **classification,
         "status": "planned",
         "approved_by": None,
+        "needs_review": (
+            plan["safety"]["decision"] == "escalate"
+        ),
+        "agent_results": {
+            "triage": plan["triage"],
+            "routing": plan["routing"],
+            "safety": plan["safety"],
+        },
         "created_at": utc_now(),
     }
 
@@ -93,7 +232,11 @@ def create_request(description):
     write_audit(
         "request_planned",
         request_id,
-        {"team": request["team"], "priority": request["priority"]},
+        {
+            "team": request["team"],
+            "needs_review": request["needs_review"],
+            "safety_decision": plan["safety"]["decision"],
+        },
     )
 
     return request
@@ -124,19 +267,24 @@ def approve_request(request_id, approver):
         if request["status"] != "planned":
             raise ValueError("Only planned requests can be approved.")
 
-        if request["service_type"] == "unknown":
-            raise ValueError("Unknown requests require manual investigation.")
+        if request["needs_review"] or request["service_type"] == "unknown":
+            raise ValueError(
+                "Safety review requires escalation; approval blocked."
+            )
 
         request["status"] = "approved"
         request["approved_by"] = approver.strip()
         request["approved_at"] = utc_now()
 
+        # This demonstration deliberately has no real dispatch operation.
         save_state(state)
+
         write_audit(
             "request_approved",
             request_id,
             {"approver": approver.strip()},
         )
+
         return request
 
     raise ValueError(f"Request not found: {request_id}")
@@ -166,7 +314,9 @@ def main():
 
         elif command == "approve":
             if len(sys.argv) < 4:
-                raise ValueError("Provide request ID and approver name.")
+                raise ValueError(
+                    "Provide request ID and approver name."
+                )
 
             result = approve_request(sys.argv[2], sys.argv[3])
 
